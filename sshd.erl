@@ -5,6 +5,14 @@
 -mode(compile).
 
 -define(TIMEOUT, 60000).
+-record(cli, {
+  user_addr,
+  remote_spec,
+  l_conn,
+  l_chan,
+  r_conn,
+  r_chan
+}).
 
 % key_cb callbacks
 -export([user_key/2, is_auth_key/3, is_host_key/4, add_host_key/3, host_key/2]).
@@ -69,9 +77,8 @@ host_key(Algo,Opts) ->
 
 
 
-on_connect(Username,_B,_C) ->
+on_connect(_Username,_B,_C) ->
   % io:format("~p on_connect: ~p ~p ~p\n",[self(), Username,B,C]),
-  put(requested_hostname, Username),
   ok.
 
 on_disconnect(_A) ->
@@ -79,101 +86,74 @@ on_disconnect(_A) ->
   ok.
 
 
-% ssh_cli
-% init(Args) ->
-%   io:format("init ~p\n",[Args]),
-%   {ok, State} = ssh_cli:init([proplists:get_value(shell,Args,{shell,start,[]})]),
-%   {ok, State}.
-
-% handle_ssh_msg(Msg, State) ->
-%   io:format("IN ~p\n",[Msg]),
-%   case ssh_cli:handle_ssh_msg(Msg, State) of
-%     {ok, State1} ->
-%       {ok, State1};
-%     {stop, ChannelId, State1} ->
-%       {stop, ChannelId, State1}
-%   end.
-
-
-% handle_msg(Msg, State) ->
-%   io:format("IN2 ~p\n",[Msg]),
-%   case ssh_cli:handle_msg(Msg, State) of
-%     {ok, State1} ->
-%       {ok, State1};
-%     {stop, ChannelId, State1} ->
-%       {stop, ChannelId, State1}
-%   end.
-
-% terminate(_,_) ->
-%   ok.
 
 
 
 init(_) ->
-  {ok, #{}}.
+  {ok, #cli{}}.
 
 
 
 
-handle_ssh_msg({ssh_cm, Conn, {data, _, Type, Data}}, #{conn := Conn, local_conn := Local, local_chan := LocChan} = State) ->
+handle_ssh_msg({ssh_cm, Conn, {data, _, Type, Data}}, #cli{r_conn = Conn, l_conn = Local, l_chan = LocChan} = State) ->
   ssh_connection:send(Local, LocChan, Type, Data, ?TIMEOUT),
   {ok, State};
 
-handle_ssh_msg({ssh_cm, _, {data, _, Type, Data}}, #{conn := Conn, channel := ChannelId} = State) ->
+handle_ssh_msg({ssh_cm, _, {data, _, Type, Data}}, #cli{r_conn = Conn, r_chan = ChannelId} = State) ->
   ssh_connection:send(Conn, ChannelId, Type, Data, ?TIMEOUT),
   {ok, State};
 
-handle_ssh_msg({ssh_cm, Conn, {eof,_}}, #{conn := Conn, local_conn := Local, local_chan := LocChan} = State) ->
+handle_ssh_msg({ssh_cm, Conn, {eof,_}}, #cli{r_conn = Conn, l_conn = Local, l_chan = LocChan} = State) ->
   ssh_connection:send_eof(Local, LocChan),
   {ok, State};
 
-handle_ssh_msg({ssh_cm, Conn, {exit_status,_,Status}}, #{conn := Conn, local_conn := Local, local_chan := LocChan} = State) ->
+handle_ssh_msg({ssh_cm, Conn, {exit_status,_,Status}}, #cli{r_conn = Conn, l_conn = Local, l_chan = LocChan} = State) ->
   ssh_connection:exit_status(Local, LocChan, Status),
   {ok, State};
 
-handle_ssh_msg({ssh_cm, Conn, {closed, _ChannelId}}, #{conn := Conn, local_chan := LocChan} = State) ->
+handle_ssh_msg({ssh_cm, Conn, {closed, _ChannelId}}, #cli{r_conn = Conn, l_chan = LocChan} = State) ->
   {stop, LocChan, State};
 
-handle_ssh_msg({ssh_cm, Conn, Msg}, #{conn := Conn} = State) ->
+handle_ssh_msg({ssh_cm, Conn, Msg}, #cli{r_conn = Conn} = State) ->
   io:format("REM2 ~p\n",[Msg]),
   {ok, State};
 
 
-handle_ssh_msg({ssh_cm, _, {pty, _Chan, _, Request}}, #{conn := Conn, channel := ChannelId} = State) ->
+handle_ssh_msg({ssh_cm, _, {pty, _Chan, _, Request}}, #cli{r_conn = Conn, r_chan = ChannelId} = State) ->
   {TermName, Width, Height, PixWidth, PixHeight, Modes} = Request,
   PtyOptions = [{term,TermName},{width,Width},{height,Height},
     {pixel_width,PixWidth},{pixel_height,PixHeight},{pty_opts,Modes}],
   ssh_connection:ptty_alloc(Conn, ChannelId, PtyOptions, ?TIMEOUT),
   {ok, State};
 
-handle_ssh_msg({ssh_cm, _, {env, _Chan, _, Var, Value}}, #{conn := Conn, channel := ChannelId} = State) ->
+handle_ssh_msg({ssh_cm, _, {env, _Chan, _, Var, Value}}, #cli{r_conn = Conn, r_chan = ChannelId} = State) ->
   ssh_connection:setenv(Conn, ChannelId, binary_to_list(Var), binary_to_list(Value), ?TIMEOUT),
   {ok, State};
 
-handle_ssh_msg({ssh_cm, Local, {shell,_LocChan,_}}, #{local_conn := Local, conn := Conn, channel := ChannelId} = State) ->
+handle_ssh_msg({ssh_cm, Local, {shell,_LocChan,_}}, #cli{l_conn = Local, r_conn = Conn, r_chan = ChannelId} = State) ->
   ssh_connection:shell(Conn, ChannelId),
   {ok, State};
 
-handle_ssh_msg({ssh_cm, Local, {exec,_LocChan,_,Command}}, #{local_conn := Local, conn := Conn, channel := ChannelId} = State) ->
+handle_ssh_msg({ssh_cm, Local, {exec,_LocChan,_,Command}}, #cli{l_conn = Local, r_conn = Conn, r_chan = ChannelId} = State) ->
   ssh_connection:exec(Conn, ChannelId, Command, ?TIMEOUT),
   {ok, State};
 
-handle_ssh_msg({ssh_cm, Local, {eof,_LocChan}}, #{local_conn := Local, conn := Conn, channel := ChannelId} = State) ->
+handle_ssh_msg({ssh_cm, Local, {eof,_LocChan}}, #cli{l_conn = Local, r_conn = Conn, r_chan = ChannelId} = State) ->
   ssh_connection:send_eof(Conn, ChannelId),
   {ok, State};
 
-handle_ssh_msg({ssh_cm, _, Msg}, State) ->
+handle_ssh_msg({ssh_cm, Local, Msg}, #cli{l_conn = Local} = State) ->
   io:format("LOC ~p\n",[Msg]),
   {ok, State};
 
 handle_ssh_msg(Msg, State) ->
-  io:format("LOC ~p\n",[Msg]),
+  io:format("Unknown ~p\n",[Msg]),
   {ok, State}.
 
 
-handle_msg({ssh_channel_up,LocChan,Local}, #{} = State) ->
-  {_,Dict} = process_info(Local, dictionary),
-  RemoteSpec = proplists:get_value(requested_hostname,Dict),
+handle_msg({ssh_channel_up,LocChan,Local}, #cli{} = State) ->
+  Dict = ssh:connection_info(Local,[user,peer]),
+  RemoteSpec = proplists:get_value(user,Dict),
   [User,Host] = case string:tokens(RemoteSpec, [$/]) of
     [User_,Host_] -> [User_,Host_];
     [_] -> ["root", RemoteSpec]
@@ -181,10 +161,10 @@ handle_msg({ssh_channel_up,LocChan,Local}, #{} = State) ->
   io:format("~p Open proxy to ~s@~s\n", [self(), User,Host]),
   {ok, Conn} = ssh:connect(Host, 22, [{user,User},{silently_accept_hosts, true},{quiet_mode, true}]),
   {ok, ChannelId} = ssh_connection:session_channel(Conn, ?TIMEOUT),
-  {ok, State#{conn => Conn, channel => ChannelId, local_conn => Local, local_chan => LocChan}};
+  {ok, State#cli{r_conn = Conn, r_chan = ChannelId, l_conn = Local, l_chan = LocChan}};
 
-handle_msg(Msg, State) ->
-  io:format("REM ~p ~p\n",[Msg,State]),
+handle_msg(Msg, #cli{} = State) ->
+  io:format("Msg ~p ~p\n",[Msg,State]),
   {ok, State}.
 
 terminate(_,_) -> ok.
