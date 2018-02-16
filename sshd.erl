@@ -90,68 +90,85 @@ on_disconnect(_A) ->
 
 
 init(_) ->
+  io:format("INIT\n"),
   {ok, #cli{}}.
 
 
 
+handle_ssh_msg({ssh_cm, Conn, Msg}, #cli{} = State) ->
+  io:format("sshmsg(~p,~p,~p) ~300p\n",[Conn, State#cli.l_conn, State#cli.r_conn, Msg]),
+  handle_ssh_msg2({ssh_cm, Conn, Msg}, State).
 
-handle_ssh_msg({ssh_cm, Conn, {data, _, Type, Data}}, #cli{r_conn = Conn, l_conn = Local, l_chan = LocChan} = State) ->
+
+handle_msg(Msg, #cli{} = State) ->
+  handle_msg2(Msg, State).
+
+
+
+
+
+
+handle_ssh_msg2({ssh_cm, Conn, {data, _, Type, Data}}, #cli{r_conn = Conn, l_conn = Local, l_chan = LocChan} = State) ->
   ssh_connection:send(Local, LocChan, Type, Data, ?TIMEOUT),
   {ok, State};
 
-handle_ssh_msg({ssh_cm, _, {data, _, Type, Data}}, #cli{r_conn = Conn, r_chan = ChannelId} = State) ->
+handle_ssh_msg2({ssh_cm, _, {data, _, Type, Data}}, #cli{r_conn = Conn, r_chan = ChannelId} = State) ->
   ssh_connection:send(Conn, ChannelId, Type, Data, ?TIMEOUT),
   {ok, State};
 
-handle_ssh_msg({ssh_cm, Conn, {eof,_}}, #cli{r_conn = Conn, l_conn = Local, l_chan = LocChan} = State) ->
+handle_ssh_msg2({ssh_cm, Conn, {eof,_}}, #cli{r_conn = Conn, l_conn = Local, l_chan = LocChan} = State) ->
   ssh_connection:send_eof(Local, LocChan),
   {ok, State};
 
-handle_ssh_msg({ssh_cm, Conn, {exit_status,_,Status}}, #cli{r_conn = Conn, l_conn = Local, l_chan = LocChan} = State) ->
+handle_ssh_msg2({ssh_cm, Conn, {exit_status,_,Status}}, #cli{r_conn = Conn, l_conn = Local, l_chan = LocChan} = State) ->
   ssh_connection:exit_status(Local, LocChan, Status),
   {ok, State};
 
-handle_ssh_msg({ssh_cm, Conn, {closed, _ChannelId}}, #cli{r_conn = Conn, l_chan = LocChan} = State) ->
+handle_ssh_msg2({ssh_cm, Conn, {closed, _ChannelId}}, #cli{r_conn = Conn, l_chan = LocChan} = State) ->
   {stop, LocChan, State};
 
-handle_ssh_msg({ssh_cm, Conn, Msg}, #cli{r_conn = Conn} = State) ->
+handle_ssh_msg2({ssh_cm, Conn, Msg}, #cli{r_conn = Conn} = State) ->
   io:format("REM2 ~p\n",[Msg]),
   {ok, State};
 
 
-handle_ssh_msg({ssh_cm, _, {pty, _Chan, _, Request}}, #cli{r_conn = Conn, r_chan = ChannelId} = State) ->
+handle_ssh_msg2({ssh_cm, _, {pty, _Chan, _, Request}}, #cli{r_conn = Conn, r_chan = ChannelId} = State) ->
   {TermName, Width, Height, PixWidth, PixHeight, Modes} = Request,
   PtyOptions = [{term,TermName},{width,Width},{height,Height},
     {pixel_width,PixWidth},{pixel_height,PixHeight},{pty_opts,Modes}],
   ssh_connection:ptty_alloc(Conn, ChannelId, PtyOptions, ?TIMEOUT),
   {ok, State};
 
-handle_ssh_msg({ssh_cm, _, {env, _Chan, _, Var, Value}}, #cli{r_conn = Conn, r_chan = ChannelId} = State) ->
+handle_ssh_msg2({ssh_cm, _, {env, _Chan, _, Var, Value}}, #cli{r_conn = Conn, r_chan = ChannelId} = State) ->
   ssh_connection:setenv(Conn, ChannelId, binary_to_list(Var), binary_to_list(Value), ?TIMEOUT),
   {ok, State};
 
-handle_ssh_msg({ssh_cm, Local, {shell,_LocChan,_}}, #cli{l_conn = Local, r_conn = Conn, r_chan = ChannelId} = State) ->
+handle_ssh_msg2({ssh_cm, Local, {shell,_LocChan,_}}, #cli{l_conn = Local, r_conn = Conn, r_chan = ChannelId} = State) ->
   ssh_connection:shell(Conn, ChannelId),
   {ok, State};
 
-handle_ssh_msg({ssh_cm, Local, {exec,_LocChan,_,Command}}, #cli{l_conn = Local, r_conn = Conn, r_chan = ChannelId} = State) ->
+handle_ssh_msg2({ssh_cm, Local, {exec,_LocChan,_,Command}}, #cli{l_conn = Local, r_conn = Conn, r_chan = ChannelId} = State) ->
   ssh_connection:exec(Conn, ChannelId, Command, ?TIMEOUT),
   {ok, State};
 
-handle_ssh_msg({ssh_cm, Local, {eof,_LocChan}}, #cli{l_conn = Local, r_conn = Conn, r_chan = ChannelId} = State) ->
+handle_ssh_msg2({ssh_cm, Local, {eof,_LocChan}}, #cli{l_conn = Local, r_conn = Conn, r_chan = ChannelId} = State) ->
   ssh_connection:send_eof(Conn, ChannelId),
   {ok, State};
 
-handle_ssh_msg({ssh_cm, Local, Msg}, #cli{l_conn = Local} = State) ->
+handle_ssh_msg2({ssh_cm, Local, Msg}, #cli{l_conn = Local} = State) ->
   io:format("LOC ~p\n",[Msg]),
   {ok, State};
 
-handle_ssh_msg(Msg, State) ->
+handle_ssh_msg2(Msg, State) ->
   io:format("Unknown ~p\n",[Msg]),
   {ok, State}.
 
 
-handle_msg({ssh_channel_up,LocChan,Local}, #cli{} = State) ->
+
+
+
+
+handle_msg2({ssh_channel_up,LocChan,Local}, #cli{} = State) ->
   Dict = ssh:connection_info(Local,[user,peer]),
   RemoteSpec = proplists:get_value(user,Dict),
   [User,Host] = case string:tokens(RemoteSpec, [$/]) of
@@ -163,7 +180,7 @@ handle_msg({ssh_channel_up,LocChan,Local}, #cli{} = State) ->
   {ok, ChannelId} = ssh_connection:session_channel(Conn, ?TIMEOUT),
   {ok, State#cli{r_conn = Conn, r_chan = ChannelId, l_conn = Local, l_chan = LocChan}};
 
-handle_msg(Msg, #cli{} = State) ->
+handle_msg2(Msg, #cli{} = State) ->
   io:format("Msg ~p ~p\n",[Msg,State]),
   {ok, State}.
 
