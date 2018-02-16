@@ -7,6 +7,7 @@
 -define(TIMEOUT, 60000).
 -record(cli, {
   user_addr,
+  private_key_path,
   remote_spec,
   l_conn,
   l_chan,
@@ -20,33 +21,114 @@
 
 -export([init/1, handle_ssh_msg/2, handle_msg/2, terminate/2]).
 
-main([]) ->
+main(Args) ->
+  Opts = parse_args(Args, #{
+    server_dir => "priv/server",
+    port => 2022,
+    private_key_path => "priv/auth",
+    user_keys => "priv/users"
+  }),
   crypto:start(),
   ssh:start(),
   error_logger:tty(true),
-  Port = 2022,
+  ServerDir = maps:get(server_dir, Opts),
+  Port = maps:get(port, Opts),
   Options = [
     {auth_methods,"publickey"},
-    {system_dir, "tmp"},
-    {key_cb, ?MODULE},
-    {ssh_cli, {?MODULE, []}},
+    {system_dir, ServerDir},
+    {key_cb, {?MODULE, [Opts]}},
+    {ssh_cli, {?MODULE, [Opts]}},
     {connectfun, fun on_connect/3},
     {disconnectfun, fun on_disconnect/1},
     {ssh_msg_debug_fun, fun(A,B,C,D) -> io:format("~p ~p ~p ~p\n",[A,B,C,D]) end}
   ],
   {ok, Daemon} = ssh:daemon(any, Port, Options),
   {ok, Info} = ssh:daemon_info(Daemon),
-  error_logger:info_msg("hi: ~p\n",[Info]),
+  io:format("Listening on port ~p\n", [proplists:get_value(port, Info)]),
   receive
     _ -> ok
   end.
 
 
-is_auth_key(PublicKey,Username,_Opts) ->
-  io:format("is_auth_key: ~s ~p\n",[element(1,PublicKey),Username]),
-  io:format("PUB: ~p\n", [catch public_key:ssh_encode(PublicKey,ssh2_pubkey)]),
-  true.
 
+parse_args([], Opts) ->
+  Opts;
+parse_args(["-h"|_], _) ->
+  io:format(
+"    -i private_ssh_dir      - directory with id_rsa key, used for authentication. By default priv/auth\n"
+"    -u users_keys_directory - directory with user keys, used for authentication. By default priv/users\n"
+"    -t private_daemon_dir   - private daemon dir with his host key. By default priv/server\n"
+"    -p port                 - port to listen. By default 2022\n"
+),
+  init:stop(2);
+parse_args(["-i", PrivateKey|Args], Opts) ->
+  parse_args(Args, Opts#{private_key_path => PrivateKey});
+parse_args(["-u", UsersKeysDir|Args], Opts) ->
+  parse_args(Args, Opts#{user_keys => UsersKeysDir});
+parse_args(["-t", TempDir|Args], Opts) ->
+  parse_args(Args, Opts#{server_dir => TempDir});
+parse_args(["-p", Port|Args], Opts) ->
+  parse_args(Args, Opts#{port => list_to_integer(Port)});
+parse_args([Opt|_], _Opts) ->
+  io:format("Unknown key: ~s\n", [Opt]),
+  init:stop(3).
+
+
+
+
+is_auth_key(PublicKey,Username,Opts0) ->
+  try is_auth_key0(PublicKey,Username,Opts0)
+  catch
+    C:E ->
+      ST = erlang:get_stacktrace(),
+      io:format("~p:~p in\n~p\n", [C,E,ST]),
+      false
+  end.
+
+
+is_auth_key0(PublicKey,Username,Opts0) ->
+  [#{} = Opts] = proplists:get_value(key_cb_private, Opts0),
+  SshKey = (catch public_key:ssh_encode(PublicKey,ssh2_pubkey)),
+  UsersKeysDir = maps:get(user_keys, Opts),
+  KeyPaths = filelib:wildcard(UsersKeysDir++"/*"),
+  % io:format("key paths: ~p\n", [KeyPaths]),
+  case search_key(SshKey, KeyPaths) of
+    {ok, Name} ->
+      case get(client_public_key_name) of
+        undefined ->
+          io:format("User ~s logged in to ~s in ~p\n", [Name, Username, self()]),
+          put(client_public_key_name, Name),
+          put(client_public_key, PublicKey);
+        _ ->
+          ok
+      end,
+      true;
+    undefined ->
+      io:format("Unknown attemp to login to ~s\n", [Username]),
+      false
+  end.
+
+
+search_key(_, []) ->
+  undefined;
+
+search_key(SshKey, [Path|List]) ->
+  case file:read_file(Path) of
+    {error, _} ->
+      io:format("Unreadable key file ~s\n", [Path]),
+      search_key(SshKey, List);
+    {ok, Text} ->
+      case binary:split(Text, <<" ">>, [global]) of
+        [<<"ssh-",_/binary>>, Key64 |_] ->
+          case base64:decode(Key64) of
+            SshKey -> {ok, filename:basename(Path)};
+            _ -> search_key(SshKey, List)
+          end;
+        _ ->
+          io:format("Unvalid key file ~s\n", [Path]),
+          search_key(SshKey, List)
+      end
+  end.
 
 user_key(A,B) ->
   io:format("user_key: ~p ~p\n",[A,B]),
@@ -89,14 +171,15 @@ on_disconnect(_A) ->
 
 
 
-init(_) ->
-  io:format("INIT\n"),
-  {ok, #cli{}}.
+init([#{} = Opts]) ->
+  % io:format("INIT: ~p\n", [_Args]),
+  PrivateKeyPath = maps:get(private_key_path, Opts),
+  {ok, #cli{private_key_path = PrivateKeyPath}}.
 
 
 
 handle_ssh_msg({ssh_cm, Conn, Msg}, #cli{} = State) ->
-  io:format("sshmsg(~p,~p,~p) ~300p\n",[Conn, State#cli.l_conn, State#cli.r_conn, Msg]),
+  % io:format("sshmsg(~p,~p,~p) ~300p\n",[Conn, State#cli.l_conn, State#cli.r_conn, Msg]),
   handle_ssh_msg2({ssh_cm, Conn, Msg}, State).
 
 
@@ -168,17 +251,31 @@ handle_ssh_msg2(Msg, State) ->
 
 
 
-handle_msg2({ssh_channel_up,LocChan,Local}, #cli{} = State) ->
+handle_msg2({ssh_channel_up,LocChan,Local}, #cli{private_key_path = PrivateKeyPath} = State) ->
   Dict = ssh:connection_info(Local,[user,peer]),
   RemoteSpec = proplists:get_value(user,Dict),
-  [User,Host] = case string:tokens(RemoteSpec, [$/]) of
-    [User_,Host_] -> [User_,Host_];
-    [_] -> ["root", RemoteSpec]
+  [User,Host, Port] = case string:tokens(RemoteSpec, [$/]) of
+    [User_,Host_, Port_] -> 
+      [User_,Host_, list_to_integer(Port_)];
+    [_] -> 
+      ["root", RemoteSpec, 22];
+    [User_,Host_] ->
+      try list_to_integer(Host_) of
+        Port_ -> ["root", User_, Port_]
+      catch
+        _:_ -> [User_,Host_, 22]
+      end
   end,
-  io:format("~p Open proxy to ~s@~s\n", [self(), User,Host]),
-  {ok, Conn} = ssh:connect(Host, 22, [{user,User},{silently_accept_hosts, true},{quiet_mode, true}]),
-  {ok, ChannelId} = ssh_connection:session_channel(Conn, ?TIMEOUT),
-  {ok, State#cli{r_conn = Conn, r_chan = ChannelId, l_conn = Local, l_chan = LocChan}};
+  % io:format("~p Open proxy to ~s@~s\n", [self(), User,Host]),
+  case ssh:connect(Host, Port, [{user,User},{user_dir,PrivateKeyPath},{silently_accept_hosts, true},{quiet_mode, true}]) of
+    {ok, Conn} ->
+      {ok, ChannelId} = ssh_connection:session_channel(Conn, ?TIMEOUT),
+      {ok, State#cli{r_conn = Conn, r_chan = ChannelId, l_conn = Local, l_chan = LocChan}};
+    {error, Error} ->
+      ssh_connection:send(Local, LocChan, 1, [Error,"\n"]),
+      {stop, LocChan, State}
+  end;
+
 
 handle_msg2(Msg, #cli{} = State) ->
   io:format("Msg ~p ~p\n",[Msg,State]),
