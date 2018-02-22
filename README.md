@@ -9,6 +9,20 @@ SSH proxy is a daemon that helps you to control access of your support team to c
 5. Upload it on that private server
 6. Now your support stuff can login to customer server unless you revoke this access
 
+# How to use?
+
+You can run `ssh-proxy` with lightweight docker image.
+
+```
+docker run -d --rm --name ssh-proxy \
+    -p PORT:2202 \
+    -v PATH_TO_AUTH_DATA:/opt/data/auth \
+    -v PATH_TO_USERS_DATA:/opt/data/users \
+    # server path must contain sshd host key named "ssh_host_rsa_key"
+    -v PATH_TO_USERS_DATA:/opt/data/server \
+    flussonic/ssh-proxy
+```
+
 # Why not authorized_keys on server?
 
 This tool is for a company that provide support to clients.
