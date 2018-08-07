@@ -1,0 +1,23 @@
+[Unit]
+Description=SSH proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Environment=HOME=/var/lib/ssh-proxy
+Environment=PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin
+Environment=LANG=C
+Type=notify
+User=root
+Group=root
+LimitNOFILE=102400
+ExecStartPre=/bin/mkdir -p /var/lib/ssh-proxy
+ExecStart=/usr/sbin/ssh-proxy.erl -c /etc/ssh-proxy/ssh-proxy.conf
+Restart=on-failure
+TimeoutStartSec=300s
+#WatchdogSec=120
+WorkingDirectory=/var/lib/ssh-proxy
+NotifyAccess=main
+
+[Install]
+WantedBy=multi-user.target
