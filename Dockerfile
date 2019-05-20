@@ -12,14 +12,14 @@ RUN mkdir -p \
         $SSH_PROXY_DATA/users \
         $SSH_PROXY_DATA/server
 
-ADD sshd.erl $SSH_PROXY_ROOT/
+ADD ssh-proxy.erl $SSH_PROXY_ROOT/
 
 RUN apk add --no-cache --virtual deps \
-    openssh && \
-    ssh-keygen -t rsa -f $SSH_PROXY_HOST_KEY && \
+    openssl && \
+    openssl genrsa -out $SSH_PROXY_HOST_KEY && \
     apk del deps
 
 ENTRYPOINT [ \
     "/bin/sh", "-c", \
-    "$SSH_PROXY_ROOT/sshd.erl -i $SSH_PROXY_DATA/auth -u $SSH_PROXY_DATA/users -t $SSH_PROXY_DATA/server" \
+    "$SSH_PROXY_ROOT/ssh-proxy.erl -i $SSH_PROXY_DATA/auth -u $SSH_PROXY_DATA/users -t $SSH_PROXY_DATA/server" \
 ]

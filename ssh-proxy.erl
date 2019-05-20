@@ -14,7 +14,8 @@
   l_conn,
   l_chan,
   r_conn,
-  r_chan
+  r_chan,
+  f_chan
 }).
 
 % key_cb callbacks
@@ -311,7 +312,11 @@ handle_ssh_msg2({ssh_cm, Conn, {data, _, Type, Data}}, #cli{r_conn = Conn, l_con
   ssh_connection:send(Local, LocChan, Type, Data, ?TIMEOUT),
   {ok, State};
 
-handle_ssh_msg2({ssh_cm, _, {data, _, Type, Data}}, #cli{r_conn = Conn, r_chan = ChannelId} = State) ->
+handle_ssh_msg2({ssh_cm, _, {data, _, Type, Data}}, #cli{r_conn = Conn, r_chan = ChannelId, f_chan = undefined} = State) ->
+  ssh_connection:send(Conn, ChannelId, Type, Data, ?TIMEOUT),
+  {ok, State};
+
+handle_ssh_msg2({ssh_cm, _, {data, _, Type, Data}}, #cli{r_conn = Conn, f_chan = ChannelId} = State) ->
   ssh_connection:send(Conn, ChannelId, Type, Data, ?TIMEOUT),
   {ok, State};
 
@@ -373,27 +378,30 @@ handle_ssh_msg2(Msg, State) ->
 
 
 
-handle_msg2({ssh_channel_up,LocChan,Local}, #cli{private_key_path = PrivateKeyPath} = State) ->
-  Dict = ssh:connection_info(Local,[user,peer]),
-  RemoteSpec = proplists:get_value(user,Dict),
-  [User,Host, Port] = case string:tokens(RemoteSpec, [$/]) of
-    [User_,Host_, Port_] -> 
-      [User_,Host_, list_to_integer(Port_)];
-    [_] -> 
-      ["root", RemoteSpec, 22];
-    [User_,Host_] ->
-      try list_to_integer(Host_) of
-        Port_ -> ["root", User_, Port_]
-      catch
-        _:_ -> [User_,Host_, 22]
-      end
-  end,
+handle_msg2({ssh_channel_up, LocChan, Local}, #cli{private_key_path = PrivateKeyPath} = State) ->
+  {[User, Host, Port], SshForward} = parse_proxy_request(Local),
   % io:format("~p Open proxy to ~s@~s\n", [self(), User,Host]),
-  case ssh:connect(Host, Port, [{user,User},{user_dir,PrivateKeyPath},{silently_accept_hosts, true},
-    {user_interaction,false},{quiet_mode, true}]) of
+  case 
+    ssh:connect(Host, Port, [
+      {user, User}, 
+      {user_dir, PrivateKeyPath},
+      {silently_accept_hosts, true},
+      {user_interaction, false},
+      {quiet_mode, true}
+    ])
+  of
     {ok, Conn} ->
       {ok, ChannelId} = ssh_connection:session_channel(Conn, ?TIMEOUT),
-      {ok, State#cli{r_conn = Conn, r_chan = ChannelId, l_conn = Local, l_chan = LocChan}};
+      case SshForward of
+        undefined ->
+          {ok, State#cli{r_conn = Conn, r_chan = ChannelId, l_conn = Local, l_chan = LocChan}};
+        [ForwardHost, ForwardPort] ->
+          {open, ForwardChannel} = direct_tcpip(Conn, 
+            {<<"127.0.0.1">>, ForwardPort}, 
+            {ForwardHost, ForwardPort}
+          ),
+          {ok, State#cli{r_conn = Conn, r_chan = ChannelId, f_chan = ForwardChannel, l_conn = Local, l_chan = LocChan}}
+      end;
     {error, Error} ->
       ssh_connection:send(Local, LocChan, 1, [Error,"\n"]),
       {stop, LocChan, State}
@@ -407,5 +415,58 @@ handle_msg2(Msg, #cli{} = State) ->
 terminate(_,_) -> ok.
 
 
+%%
+%%
+parse_proxy_request(SshConnection) ->
+  Request = proplists:get_value(user, 
+    ssh:connection_info(SshConnection, [user, peer])
+  ),
+  [SshHost | SshForward] = string:tokens(Request, [$~]),
+  {parse_user_host_port(SshHost), parse_host_port(SshForward)}.
 
+parse_host_port([]) ->
+  undefined;
+parse_host_port([Spec]) ->
+  [Host, Port] = string:tokens(Spec, [$/]),
+  [erlang:list_to_binary(Host), list_to_integer(Port)].
 
+parse_user_host_port(Spec) ->
+  case string:tokens(Spec, [$/]) of
+    [User, Host, Port] -> 
+      [User, Host, list_to_integer(Port)];
+    [Host] -> 
+      ["root", Host, 22];
+    [User, Host] ->
+      try list_to_integer(Host) of
+        Port -> ["root", User, Port]
+      catch
+        _:_ -> [User, Host, 22]
+      end
+  end.
+
+%%
+%%
+direct_tcpip(Conn, From, To) ->
+  {OrigHost, OrigPort} = From,
+  {RemoteHost, RemotePort} = To,
+
+  RemoteLen = byte_size(RemoteHost),
+  OrigLen = byte_size(OrigHost),
+
+  Msg = <<
+    RemoteLen:32,
+    RemoteHost/binary,
+    RemotePort:32,
+    OrigLen:32,
+    OrigHost/binary,
+    OrigPort:32
+  >>,
+
+  ssh_connection_handler:open_channel(
+    Conn,
+    "direct-tcpip",
+    Msg,
+    1024 * 1024,
+    32 * 1024,
+    infinity
+  ).
